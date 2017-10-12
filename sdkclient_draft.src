@@ -1,0 +1,123 @@
+package sdkutilv1
+
+import (
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+
+	apiConfig "github.com/hyperledger/fabric-sdk-go/api/apiconfig"
+	deffab "github.com/hyperledger/fabric-sdk-go/def/fabapi"
+	"github.com/hyperledger/fabric-sdk-go/def/fabapi/opt"
+	apiConfigImpl "github.com/hyperledger/fabric-sdk-go/pkg/config"
+
+	fabricCAClient "github.com/hyperledger/fabric-sdk-go/pkg/fabric-ca-client"
+	identityImpl "github.com/hyperledger/fabric-sdk-go/pkg/fabric-client/identity"
+	bccspFactory "github.com/hyperledger/fabric-sdk-go/third_party/github.com/hyperledger/fabric/bccsp/factory"
+
+	adminTrxn "github.com/hyperledger/fabric-sdk-go/pkg/fabric-txn/admin"
+
+	viperParser "github.com/spf13/viper"
+)
+
+type ClientSDK struct {
+	Initiazed bool
+}
+
+// InitializeSDK : This method initializes the SDK by reading the configurations from the path
+func InitializeSDK(configfilePath string, orgId string) (ClientSDK, error) {
+	var configuration apiConfig.Config
+	configuration, err := apiConfigImpl.InitConfig(configfilePath)
+	if err != nil {
+		return ClientSDK{Initiazed: false}, fmt.Errorf("Unable to initialize the config file: %v", err)
+	}
+	configParser := viperParser.New()
+	configParser.SetConfigFile(configfilePath)
+	err = configParser.ReadInConfig()
+	if err != nil {
+		return ClientSDK{Initiazed: false}, fmt.Errorf("Error reading the config file SDK: %v", err)
+	}
+
+	// Initialize blockchain cryptographic service provider (BCCSP)
+	// This tool manages certificates and keys
+	err = bccspFactory.InitFactories(configuration.CSPConfig())
+	if err != nil {
+		fmt.Printf("Failed getting ephemeral software-based BCCSP [%s]", err)
+	}
+	sdkOptions := deffab.Options{
+		ConfigFile: configfilePath,
+		StateStoreOpts: opt.StateStoreOpts{
+			Path: "/tmp/enroll_user",
+		},
+	}
+
+	sdk, err := deffab.NewSDK(sdkOptions)
+	if err != nil {
+		return ClientSDK{Initiazed: false}, fmt.Errorf("Error initializing SDK: %v", err)
+	}
+
+	context, err := sdk.NewContext(orgId)
+	if err != nil {
+		return ClientSDK{Initiazed: false}, fmt.Errorf("Error getting a context for org: %s", err)
+	}
+	user, err := deffab.NewUser(sdk.ConfigProvider(), context.MSPClient(), "admin", "adminpw", orgId)
+	if err != nil {
+		return ClientSDK{Initiazed: false}, fmt.Errorf("NewUser returned error: %v", err)
+	}
+
+	session1, err := sdk.NewSession(context, user)
+	if err != nil {
+		return ClientSDK{Initiazed: false}, fmt.Errorf("NewSession returned error: %v", err)
+	}
+	client, err := sdk.NewSystemClient(session1)
+	if err != nil {
+		return ClientSDK{Initiazed: false}, fmt.Errorf("NewSystemClient returned error: %v", err)
+	}
+
+	err = client.SaveUserToStateStore(user, false)
+	if err != nil {
+		return ClientSDK{Initiazed: false}, fmt.Errorf("client.SaveUserToStateStore returned error: %v", err)
+	}
+
+	orgAdmin := InitializeCA(configuration, orgId)
+	//Read the
+
+	ordererAdmin, err := deffab.NewPreEnrolledUser(configuration, configParser.GetString("x-orderer-key-path"), configParser.GetString("x-orderer-cert-path"), "orderAdmin", configParser.GetString("x-orderer-msp-id"), client.CryptoSuite())
+
+	adminTrxn.CreateOrUpdateChannel(client, ordererAdmin, orgAdmin, nil, "tx file path")
+	return ClientSDK{Initiazed: true}, nil
+}
+
+//InitializeCA: Intializes the CA
+func InitializeCA(configuration apiConfig.Config, orgID string) *identityImpl.User {
+
+	orgCAConfig, err := configuration.CAConfig(orgID)
+	if orgCAConfig == nil || err != nil {
+		fmt.Printf("CA Config not found for %s", orgID)
+
+	}
+	caClient, err := fabricCAClient.NewFabricCAClient(configuration, orgID)
+	if err != nil {
+		fmt.Printf("NewFabricCAClient return error: %v", err)
+	}
+
+	mspID, _ := configuration.MspID(orgID)
+
+	adminKey, adminCert, err := caClient.Enroll(orgCAConfig.Registrar.EnrollId, orgCAConfig.Registrar.EnrollSecret)
+	if err != nil && adminKey == nil && adminCert == nil {
+		fmt.Printf("NewFabricCAClient Enrollment failed %v", err)
+	} else {
+		certPem, _ := pem.Decode(adminCert)
+		cert509, _ := x509.ParseCertificate(certPem.Bytes)
+		fmt.Printf("Certificate common name %s", cert509.Subject.CommonName)
+		user := identityImpl.NewUser(orgCAConfig.Registrar.EnrollId, mspID)
+		user.SetEnrollmentCertificate(adminCert)
+		user.SetPrivateKey(adminKey)
+		return user
+	}
+	return nil
+}
+func z_main() {
+	fmt.Println("Start the SDK")
+	InitializeSDK("config.yaml", "org1")
+	fmt.Println("SDK Initiazation done ")
+}
